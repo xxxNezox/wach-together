@@ -34,6 +34,46 @@
     background: linear-gradient(var(--bg) 80%, rgba(18,20,25,0));
   }
   header h1 { font-size: 20px; margin: 0; letter-spacing: .2px; }
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  button {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--panel-2);
+    border: 1px solid #333946;
+    border-radius: 10px;
+    padding: 9px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%) translateY(16px);
+    background: #262a35;
+    color: var(--text);
+    padding: 10px 16px;
+    border-radius: 10px;
+    border: 1px solid #333946;
+    font-size: 13px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .2s, transform .2s;
+    z-index: 10000;
+    max-width: 90vw;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
   #pool { padding: 12px 16px 4px; }
   .section-title {
@@ -94,15 +134,6 @@
     font-size: 26px;
     letter-spacing: .5px;
   }
-  .tier-label span {
-    font-size: 9px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: .5px;
-    opacity: .65;
-    text-align: center;
-    padding: 0 4px;
-  }
   .tier-items {
     flex: 1;
     display: flex;
@@ -127,6 +158,7 @@
     transition: border-color .12s, box-shadow .12s, opacity .12s;
     touch-action: manipulation;
   }
+  .tier .item { touch-action: none; }
   .item img {
     display: block;
     width: 100%;
@@ -190,7 +222,10 @@
 <body>
 <div class="app">
   <header>
-    <h1>просмотровый рейтинг</h1>
+    <div class="header-row">
+      <h1>просмотровый рейтинг</h1>
+      <button id="share">Поделиться</button>
+    </div>
   </header>
 
   <section id="pool">
@@ -205,6 +240,8 @@
     <ul id="legend-list"></ul>
   </details>
 </div>
+
+<div class="toast" id="toast"></div>
 
 <script>
 const TIERS = ["S", "A", "B", "C", "D", "E", "F"];
@@ -250,7 +287,7 @@ function buildTiers() {
     const label = document.createElement("div");
     label.className = "tier-label";
     label.style.background = TIER_COLORS[t];
-    label.innerHTML = t + "<span>" + TIER_MEANINGS[t] + "</span>";
+    label.textContent = t;
 
     const box = document.createElement("div");
     box.className = "tier-items";
@@ -383,7 +420,7 @@ function onPointerMove(e) {
   if (!drag.moved) {
     if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 6) {
       drag.moved = true;
-      if (e.pointerType !== "touch") startDrag(e);
+      if (e.pointerType !== "touch" || !drag.el.closest("#pool-items")) startDrag(e);
     } else {
       return;
     }
@@ -462,6 +499,197 @@ document.addEventListener("click", (e) => {
 
 
 
+
+let toastTimer;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+const coverCache = {};
+function loadImage(src) {
+  if (coverCache[src]) return coverCache[src];
+  coverCache[src] = new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ ok: true, img });
+    img.onerror = () => resolve({ ok: false, img: null });
+    img.src = src;
+  });
+  return coverCache[src];
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function truncate(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let t = text;
+  while (t.length && ctx.measureText(t + "…").width > maxWidth) t = t.slice(0, -1);
+  return t + "…";
+}
+
+function wrapText(ctx, text, maxWidth, maxLines) {
+  const words = text.split(" ");
+  const lines = [];
+  let cur = "";
+  for (const w of words) {
+    const cand = cur ? cur + " " + w : w;
+    if (ctx.measureText(cand).width <= maxWidth) cur = cand;
+    else { if (cur) lines.push(cur); cur = w; }
+  }
+  if (cur) lines.push(cur);
+  if (lines.length > maxLines) {
+    lines.splice(maxLines - 1);
+    lines[maxLines - 1] = truncate(ctx, lines[maxLines - 1], maxWidth);
+  }
+  return lines;
+}
+
+async function renderTierImage() {
+  const loaded = {};
+  await Promise.all(movies.map(async (m) => { loaded[m.title_en] = (await loadImage(m.cover)).img; }));
+
+  const canvasW = 1080;
+  const padX = 28;
+  const padY = 28;
+  const labelW = 130;
+  const gap = 12;
+  const posterW = 96;
+  const posterH = 144;
+  const titleH = 38;
+  const itemH = posterH + titleH;
+  const availW = canvasW - padX * 2 - labelW - gap;
+  const perLine = Math.max(1, Math.floor((availW + gap) / (posterW + gap)));
+
+  const sections = TIERS.map((t) => ({ label: t, color: TIER_COLORS[t], ids: idsOf(tierContainers[t]) }));
+  const unplaced = idsOf(poolItems);
+  if (unplaced.length) sections.push({ label: "", color: "#3a3f4b", ids: unplaced });
+
+  let height = padY;
+  sections.forEach((s) => {
+    const rows = s.ids.length ? Math.ceil(s.ids.length / perLine) : 1;
+    height += rows * itemH + gap * 2;
+  });
+  height += padY;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = canvasW;
+  canvas.height = Math.max(height, 200);
+  const ctx = canvas.getContext("2d");
+
+  ctx.fillStyle = "#121419";
+  ctx.fillRect(0, 0, canvasW, canvas.height);
+
+  let y = padY;
+  sections.forEach((s) => {
+    const rows = s.ids.length ? Math.ceil(s.ids.length / perLine) : 1;
+    const bandH = rows * itemH + gap * 2;
+
+    ctx.fillStyle = "#1d2028";
+    roundedRect(ctx, padX, y, canvasW - padX * 2, bandH, 18);
+    ctx.fill();
+
+    ctx.fillStyle = s.color;
+    roundedRect(ctx, padX + 10, y + 10, labelW - 10, bandH - 20, 14);
+    ctx.fill();
+
+    ctx.fillStyle = "#14151a";
+    ctx.font = "800 64px -apple-system, 'Segoe UI', Roboto, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(s.label, padX + 10 + (labelW - 10) / 2, y + bandH / 2);
+
+    const startX = padX + labelW + gap;
+    s.ids.forEach((id, i) => {
+      const col = i % perLine;
+      const row = Math.floor(i / perLine);
+      const ix = startX + col * (posterW + gap);
+      const iy = y + 10 + row * itemH;
+      const img = loaded[id];
+      if (img) {
+        ctx.save();
+        roundedRect(ctx, ix, iy, posterW, posterH, 12);
+        ctx.clip();
+        ctx.drawImage(img, ix, iy, posterW, posterH);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = "#20232c";
+        roundedRect(ctx, ix, iy, posterW, posterH, 12);
+        ctx.fill();
+      }
+      const m = movies.find((mm) => mm.title_en === id);
+      ctx.fillStyle = "#e7e9ee";
+      ctx.font = "600 15px -apple-system, 'Segoe UI', Roboto, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      wrapText(ctx, m.title_ru, posterW, 2).forEach((ln, li) => {
+        ctx.fillText(ln, ix, iy + posterH + 4 + li * 18);
+      });
+    });
+
+    y += bandH;
+  });
+
+  return canvas;
+}
+
+function downloadBlob(blob) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "tierlist.png";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast("Изображение сохранено");
+}
+
+async function onShare() {
+  const btn = document.getElementById("share");
+  btn.disabled = true;
+  let blob;
+  try {
+    const canvas = await renderTierImage();
+    blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+  } catch (e) {
+    toast("Не удалось сформировать изображение");
+    btn.disabled = false;
+    return;
+  }
+  const file = new File([blob], "tierlist.png", { type: "image/png" });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file], title: "Мой просмотровый рейтинг" });
+      btn.disabled = false;
+      return;
+    } catch (e) {
+      if (e && e.name === "AbortError") { btn.disabled = false; return; }
+    }
+  }
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      toast("Изображение скопировано в буфер");
+    } else {
+      downloadBlob(blob);
+    }
+  } catch (e) {
+    downloadBlob(blob);
+  }
+  btn.disabled = false;
+}
+
+document.getElementById("share").addEventListener("click", onShare);
 
 fetch("movies.json")
   .then((r) => r.json())
